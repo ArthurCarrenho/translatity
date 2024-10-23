@@ -8,6 +8,7 @@ import re
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class APIKeyRotator(QObject):
+    # Existing APIKeyRotator implementation remains the same
     key_changed = pyqtSignal(int)
 
     def __init__(self, api_keys):
@@ -50,7 +51,55 @@ class SRTTranslator:
             "top_k": 64,
             "max_output_tokens": 8192,
         }
-        return genai.GenerativeModel(model_name="gemini-1.5-pro", generation_config=generation_config)
+        
+        safety_settings = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            }
+        ]
+        
+        return genai.GenerativeModel(
+            model_name="gemini-1.5-pro",
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+
+    def _make_api_request(self, chat_session, message, is_continuation=False, retry_count=0):
+        try:
+            self._wait_with_backoff(retry_count)
+            
+            if is_continuation:
+                response = chat_session.send_message("continue")
+            else:
+                if isinstance(message, list):
+                    message = "\n---\n".join(message)
+                response = chat_session.send_message(message)
+            
+            return response
+            
+        except exceptions.ResourceExhausted as e:
+            if retry_count >= self.max_retries - 1:
+                self._handle_quota_exhaustion()
+                return self._make_api_request(chat_session, message, is_continuation, 0)
+            logging.warning(f"Resource exhausted, retrying... ({retry_count + 1}/{self.max_retries})")
+            return self._make_api_request(chat_session, message, is_continuation, retry_count + 1)
+            
+        except Exception as e:
+            logging.error(f"Unexpected error during API request: {e}")
+            raise
 
     def _calculate_backoff(self, retry_count):
         delay = min(self.max_backoff, self.base_delay * (2 ** retry_count))
@@ -73,33 +122,13 @@ class SRTTranslator:
         self.key_rotator.rotate_key()
         self.model = self._initialize_model()
 
-    def _make_api_request(self, chat_session, message, is_continuation=False):
-        for retry_count in range(self.max_retries):
-            try:
-                self._wait_with_backoff(retry_count)
-                
-                if is_continuation:
-                    response = chat_session.send_message("continue")
-                else:
-                    response = chat_session.send_message(message)
-                
-                return response
-                
-            except exceptions.ResourceExhausted as e:
-                if retry_count == self.max_retries - 1:
-                    self._handle_quota_exhaustion()
-                    return self._make_api_request(chat_session, message, is_continuation)
-                logging.warning(f"Resource exhausted, retrying... ({retry_count + 1}/{self.max_retries})")
-                
-            except Exception as e:
-                logging.error(f"Unexpected error during API request: {e}")
-                raise
-
     def _create_chat(self):
         self.chat = self.model.start_chat()
         return self.chat
 
-    def translate_file(self, input_path, output_path, save_progress=True, progress_callback=None, status_callback=None, input_lang="English", output_lang="Portuguese", context="", cancel_check=None):
+    def translate_file(self, input_path, output_path, save_progress=True, progress_callback=None, 
+                      status_callback=None, input_lang="English", output_lang="Portuguese", 
+                      context="", cancel_check=None):
         input_path = Path(input_path)
         output_path = Path(output_path)
         progress_path = output_path.with_suffix('.progress')
@@ -145,6 +174,7 @@ class SRTTranslator:
                     input_content,
                     "Translate the provided subtitle file. Maintain SRT format and timing."
                 ])
+                
                 current_blocks = len(extract_srt_blocks(response.text))
                 translated_content.extend(extract_srt_blocks(response.text))
                 logging.info(f"Translated {current_blocks}/{total_blocks} blocks")
