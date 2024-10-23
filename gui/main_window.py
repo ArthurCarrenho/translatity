@@ -1,4 +1,6 @@
+# main_window.py
 import os
+import logging
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFileDialog, QTextEdit, QProgressBar, 
                              QListWidget, QMessageBox, QInputDialog, QLineEdit, QComboBox,
@@ -16,7 +18,7 @@ class TranslationWorker(QThread):
     status_update = pyqtSignal(str)
     translation_complete = pyqtSignal(str, str)
     translation_error = pyqtSignal(str)
-    finished = pyqtSignal()  # Add this signal
+    finished = pyqtSignal()
 
     def __init__(self, translator, input_file, output_file, input_lang, output_lang, context):
         super().__init__()
@@ -45,7 +47,7 @@ class TranslationWorker(QThread):
         except Exception as e:
             self.translation_error.emit(str(e))
         finally:
-            self.finished.emit()  # Always emit finished signal
+            self.finished.emit()
 
     def check_cancelled(self):
         return self.is_cancelled
@@ -66,6 +68,8 @@ class MainWindow(QMainWindow):
 
         self.api_keys = []
         self.file_queue = []
+        self.failed_files = set()
+        self.is_translation_running = False
         self.settings = QSettings("ArthurCarrenho", "Translatity")
         self.setup_ui()
         self.load_settings()
@@ -95,6 +99,20 @@ class MainWindow(QMainWindow):
         self.queue_list.item_deleted.connect(self.remove_file_from_queue)
         left_layout.addWidget(QLabel("Translation Queue:"))
         left_layout.addWidget(self.queue_list)
+
+        # Queue management buttons
+        queue_buttons_layout = QHBoxLayout()
+        
+        self.retry_button = QPushButton("Retry Failed Files")
+        self.retry_button.clicked.connect(self.retry_failed_files)
+        self.retry_button.setEnabled(False)
+        queue_buttons_layout.addWidget(self.retry_button)
+        
+        self.clear_queue_button = QPushButton("Clear Queue")
+        self.clear_queue_button.clicked.connect(self.clear_queue)
+        queue_buttons_layout.addWidget(self.clear_queue_button)
+        
+        left_layout.addLayout(queue_buttons_layout)
 
         # Language selection
         lang_layout = QHBoxLayout()
@@ -171,10 +189,65 @@ class MainWindow(QMainWindow):
             self.update_queue_list()
             self.file_label.setText(f"{len(self.file_queue)} file(s) in queue")
 
+    def clear_queue(self):
+        if self.queue_list.count() > 0:
+            reply = QMessageBox.question(
+                self, 
+                "Clear Queue", 
+                "Are you sure you want to clear the queue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.queue_list.clear()
+                self.file_queue.clear()
+                self.failed_files.clear()
+                self.retry_button.setEnabled(False)
+                self.file_label.setText("No file selected")
+                self.file_preview.setPlainText("")
+                self.progress_bar.setValue(0)
+                self.update_status("Queue cleared")
+
     def update_queue_list(self):
         self.queue_list.clear()
-        for file in self.file_queue:
-            self.queue_list.addItem(Path(file).name)
+        for i, file in enumerate(self.file_queue):
+            item = QListWidgetItem(Path(file).name)
+            if i in self.failed_files:
+                item.setBackground(get_color('error'))
+            self.queue_list.addItem(item)
+        self.enable_retry_if_needed()
+
+    def enable_retry_if_needed(self):
+        has_failed_files = len(self.failed_files) > 0
+        self.retry_button.setEnabled(has_failed_files and not self.is_translation_running)
+        if has_failed_files:
+            logging.info(f"Retry button enabled. Failed files: {self.failed_files}")
+
+    def retry_failed_files(self):
+        if not self.failed_files:
+            return
+
+        failed_indices = sorted(list(self.failed_files), reverse=True)
+        retry_files = []
+        
+        for index in failed_indices:
+            if index < len(self.file_queue):
+                file_path = self.file_queue[index]
+                retry_files.append(file_path)
+                logging.info(f"Moving failed file for retry: {file_path}")
+                del self.file_queue[index]
+                item = self.queue_list.takeItem(index)
+                if item:
+                    item.setBackground(QColor())
+
+        self.file_queue.extend(retry_files)
+        self.update_queue_list()
+        
+        self.failed_files.clear()
+        self.retry_button.setEnabled(False)
+        
+        if not self.is_translation_running:
+            self.start_translation_queue()
 
     def update_file_queue(self):
         new_queue = []
@@ -188,6 +261,13 @@ class MainWindow(QMainWindow):
     def remove_file_from_queue(self, index):
         if 0 <= index < len(self.file_queue):
             del self.file_queue[index]
+            new_failed = set()
+            for failed_index in self.failed_files:
+                if failed_index > index:
+                    new_failed.add(failed_index - 1)
+                elif failed_index < index:
+                    new_failed.add(failed_index)
+            self.failed_files = new_failed
         self.update_queue_list()
 
     def update_file_preview(self, current, previous):
@@ -205,13 +285,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Please add at least one API key.")
             return
 
+        self.is_translation_running = True
         self.translator = SRTTranslator(api_keys)
         self.translator.key_rotator.key_changed.connect(self.highlight_current_api_key)
         self.current_file_index = 0
-        self.highlight_current_api_key(0)  # Highlight the first key
+        self.highlight_current_api_key(0)
         self.translate_button.setText("Cancel Translation")
         self.translate_button.clicked.disconnect()
         self.translate_button.clicked.connect(self.cancel_translation)
+        self.retry_button.setEnabled(False)
         self.translate_next_file()
 
     def translate_next_file(self):
@@ -234,7 +316,7 @@ class MainWindow(QMainWindow):
             self.translation_worker.finished.connect(self.translation_finished)
             
             self.translation_worker.start()
-            self.progress_bar.setValue(0)  # Reset progress bar
+            self.progress_bar.setValue(0)
             self.update_status(f"Translating: {Path(input_file).name}")
             if self.current_file_index < self.queue_list.count():
                 item = self.queue_list.item(self.current_file_index)
@@ -249,6 +331,14 @@ class MainWindow(QMainWindow):
             self.update_status("Translation cancelled")
             self.translation_cancelled()
 
+    def translation_cancelled(self):
+        self.is_translation_running = False
+        self.translate_button.setText("Translate Queue")
+        self.translate_button.clicked.disconnect()
+        self.translate_button.clicked.connect(self.start_translation_queue)
+        self.enable_retry_if_needed()
+        QMessageBox.information(self, "Translation Cancelled", "The translation process has been cancelled.")
+
     def file_translation_complete(self, input_file, output_file):
         if self.current_file_index < self.queue_list.count():
             item = self.queue_list.item(self.current_file_index)
@@ -256,32 +346,40 @@ class MainWindow(QMainWindow):
                 item.setBackground(get_color('success'))
         self.update_status(f"Completed: {Path(input_file).name}")
 
-    def translation_finished(self):
-        self.current_file_index += 1
-        if self.current_file_index < len(self.file_queue):
-            QTimer.singleShot(100, self.translate_next_file)  # Small delay before starting next file
-        else:
-            self.queue_translation_complete()
-
     def translation_error(self, error_message):
         self.update_status(f"Error: {error_message}")
         if self.current_file_index < self.queue_list.count():
             item = self.queue_list.item(self.current_file_index)
             if item:
                 item.setBackground(get_color('error'))
+                self.failed_files.add(self.current_file_index)
+                self.enable_retry_if_needed()
+                logging.error(f"Translation failed for file at index {self.current_file_index}: {error_message}")
+
+    def translation_finished(self):
+        if hasattr(self, 'translation_worker'):
+            self.current_file_index += 1
+            if self.current_file_index < len(self.file_queue):
+                QTimer.singleShot(100, self.translate_next_file)
+            else:
+                self.is_translation_running = False
+                self.queue_translation_complete()
+                self.enable_retry_if_needed()
 
     def queue_translation_complete(self):
+        self.is_translation_running = False
         self.update_status("Translation queue completed")
         self.translate_button.setText("Translate Queue")
         self.translate_button.clicked.disconnect()
         self.translate_button.clicked.connect(self.start_translation_queue)
-        QMessageBox.information(self, "Queue Complete", "All files in the queue have been translated.")
-
-    def translation_cancelled(self):
-        self.translate_button.setText("Translate Queue")
-        self.translate_button.clicked.disconnect()
-        self.translate_button.clicked.connect(self.start_translation_queue)
-        QMessageBox.information(self, "Translation Cancelled", "The translation process has been cancelled.")
+        
+        if self.failed_files:
+            message = f"Queue completed with {len(self.failed_files)} failed files. Use 'Retry Failed Files' to attempt translation again."
+            self.enable_retry_if_needed()
+        else:
+            message = "All files in the queue have been translated successfully."
+        
+        QMessageBox.information(self, "Queue Complete", message)
 
     def update_progress(self, current, total):
         self.progress_bar.setValue(int((current / total) * 100))
