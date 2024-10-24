@@ -8,7 +8,7 @@ import re
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class APIKeyRotator(QObject):
-    # Existing APIKeyRotator implementation remains the same
+    # APIKeyRotator implementation remains the same
     key_changed = pyqtSignal(int)
 
     def __init__(self, api_keys):
@@ -42,6 +42,9 @@ class SRTTranslator:
         self.max_retries = 5
         self.max_backoff = 300
         self.chat = None
+        # Add counters for 99% completion check
+        self.near_completion_count = 0
+        self.last_block_count = 0
 
     def _initialize_model(self):
         genai.configure(api_key=self.key_rotator.get_current_key())
@@ -76,6 +79,21 @@ class SRTTranslator:
             generation_config=generation_config,
             safety_settings=safety_settings
         )
+
+    def _check_near_completion(self, current_blocks, total_blocks):
+        """Check if translation is near completion (≥99%) for consecutive tries."""
+        completion_percentage = (current_blocks / total_blocks) * 100
+        
+        if completion_percentage >= 99:
+            if current_blocks == self.last_block_count:
+                self.near_completion_count += 1
+            else:
+                self.near_completion_count = 1
+        else:
+            self.near_completion_count = 0
+            
+        self.last_block_count = current_blocks
+        return self.near_completion_count >= 2
 
     def _make_api_request(self, chat_session, message, is_continuation=False, retry_count=0):
         try:
@@ -193,6 +211,13 @@ class SRTTranslator:
                     if status_callback:
                         status_callback("Translation cancellation requested")
                     return
+
+                # Check if we're at 99% completion for 2 consecutive tries
+                if self._check_near_completion(len(translated_content), total_blocks):
+                    logging.info("Translation reached 99% completion for 2 consecutive tries. Marking as complete.")
+                    if status_callback:
+                        status_callback("Translation completed (99% threshold reached)")
+                    break
 
                 if status_callback:
                     status_callback("Continuing translation...")

@@ -73,7 +73,6 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("ArthurCarrenho", "Translatity")
         self.setup_ui()
         self.load_settings()
-        self.apply_theme()
 
     def setup_ui(self):
         # Main layout split
@@ -171,11 +170,6 @@ class MainWindow(QMainWindow):
         self.file_preview = FilePreview()
         right_layout.addWidget(QLabel("File Preview:"))
         right_layout.addWidget(self.file_preview)
-
-        # Dark mode toggle
-        self.dark_mode_checkbox = QCheckBox("Dark Mode")
-        self.dark_mode_checkbox.stateChanged.connect(self.toggle_dark_mode)
-        right_layout.addWidget(self.dark_mode_checkbox)
 
         splitter.addWidget(right_panel)
 
@@ -393,14 +387,12 @@ class MainWindow(QMainWindow):
         self.input_lang.setCurrentText(self.settings.value("input_lang", "English", type=str))
         self.output_lang.setCurrentText(self.settings.value("output_lang", "Portuguese", type=str))
         self.context_input.setPlainText(self.settings.value("context", "", type=str))
-        self.dark_mode_checkbox.setChecked(self.settings.value("dark_mode", False, type=bool))
 
     def save_settings(self):
         self.settings.setValue("api_keys", self.api_keys)
         self.settings.setValue("input_lang", self.input_lang.currentText())
         self.settings.setValue("output_lang", self.output_lang.currentText())
         self.settings.setValue("context", self.context_input.toPlainText())
-        self.settings.setValue("dark_mode", self.dark_mode_checkbox.isChecked())
 
     def update_api_key_list(self):
         self.api_key_list.clear()
@@ -452,13 +444,6 @@ class MainWindow(QMainWindow):
                 self.file_queue.append(file_path)
         self.update_queue_list()
         self.file_label.setText(f"{len(self.file_queue)} file(s) in queue")
-
-    def toggle_dark_mode(self, state):
-        self.apply_theme()
-        self.save_settings()
-
-    def apply_theme(self):
-        apply_theme(self, self.dark_mode_checkbox.isChecked())
 
     def highlight_current_api_key(self, index):
         for i in range(self.api_key_list.count()):
